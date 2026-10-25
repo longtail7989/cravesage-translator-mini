@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "크레이브사가 번역기 Mini",
+  "version": "0.1.2",
+  "description": "저장된 번역 캐시만 적용합니다. 캐시 파일 병합과 팝업 번역 수정을 지원하며 AI에 연결하지 않습니다.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage"],
+  "host_permissions": ["https://gg-client-r.crave-saga.net/*"],
+  "background": {"service_worker": "background.mjs", "type": "module"},
+  "action": {
+    "default_title": "크레이브사가 번역기 Mini",
+    "default_popup": "popup.html",
+    "default_icon": {"16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png"}
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://gg-client-r.crave-saga.net/client/*/index_dmm.html"],
+      "js": ["name-policy.js", "main.js"],
+      "all_frames": true,
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://gg-client-r.crave-saga.net/client/*/index_dmm.html"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "world": "ISOLATED",
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; connect-src 'none'"
+  },
+  "icons": {"16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png"}
+}

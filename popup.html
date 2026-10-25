@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>크레이브사가 캐시 번역</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.mjs"></script>
+</head>
+<body>
+  <header class="app-header">
+    <img src="icons/icon48.png" alt="" width="36" height="36">
+    <div><h1>캐시 번역 <span class="badge">MINI</span></h1><p>저장된 번역만, 외부 요청 없이</p></div>
+    <button id="openTab" type="button" class="quiet" title="큰 파일 작업 전에 새 탭으로 열기">새 탭 ↗</button>
+  </header>
+  <main id="main" aria-busy="true">
+    <div class="overview"><span>저장된 번역 <strong id="cacheCount">—</strong>개</span><span id="version" class="muted"></span></div>
+    <section class="card" aria-labelledby="settingsHeading">
+      <h2 id="settingsHeading">게임 적용 설정</h2>
+      <form id="settingsForm">
+        <label class="toggle"><input id="enabled" name="enabled" type="checkbox" checked disabled><span>캐시 번역 적용</span></label>
+        <div class="two-columns">
+          <label>대상 언어<input id="target" name="target" value="한국어" maxlength="64" required disabled autocomplete="off" list="targetSuggestions"></label>
+          <label>글꼴<input id="fontFamily" name="fontFamily" value="Malgun Gothic" maxlength="100" placeholder="비우면 게임 기본 글꼴" disabled autocomplete="off" list="fontSuggestions"></label>
+        </div>
+        <datalist id="targetSuggestions"><option value="한국어"><option value="English"><option value="繁體中文"><option value="简体中文"></datalist>
+        <datalist id="fontSuggestions"><option value="Malgun Gothic"><option value="맑은 고딕"><option value="Noto Sans KR"><option value="sans-serif"></datalist>
+        <label>게임 원문 이름 (비우면 자동 감지)<input id="playerName" name="playerName" maxlength="64" disabled autocomplete="off" aria-describedby="namesHint"></label>
+        <label>번역에 표시할 이름 (비우면 게임 이름)<input id="displayName" name="displayName" maxlength="64" disabled autocomplete="off" aria-describedby="namesHint"></label>
+        <p id="namesHint" class="note">프로필 닉네임과 이야기 속 주인공 이름은 다를 수 있습니다. 원문 이름 직접 입력은 자동 감지 실패 시 대체·테스트용입니다. 공유 캐시는 이름 대신 {USER}를 사용합니다. 각 이름은 64자 이하이며 &lt; &gt; { }와 줄바꿈은 사용할 수 없습니다.</p>
+        <div class="action-row"><span id="settingsHint" class="muted">변경 후 저장해야 적용됩니다.</span><button id="saveSettings" type="submit" disabled>설정 저장</button></div>
+      </form>
+      <p class="note">대상 언어와 원문이 일치하는 캐시를 우선 적용하며, 이름 공유 캐시는 감지·입력한 이름으로 표시합니다. 없는 번역은 원문 그대로 표시하며 AI 번역·네트워크 요청은 하지 않습니다.</p>
+    </section>
+    <section class="card" aria-labelledby="transferHeading">
+      <h2 id="transferHeading">캐시 파일</h2>
+      <p class="note">추가 파일은 기본적으로 병합합니다. 큰 파일은 NDJSON / JSONL, 기존 JSON v1·v2·v3는 32 MiB 이하를 지원합니다.</p>
+      <label>가져올 파일<input id="cacheFile" type="file" accept=".json,.ndjson,.jsonl,application/json,application/x-ndjson" disabled></label>
+      <div class="two-columns">
+        <label>가져오기 방식<select id="importMode" disabled><option value="merge">추가 병합 (권장)</option><option value="replace">전체 교체</option></select></label>
+        <label id="conflictField">같은 원문·언어가 있으면<select id="conflictPolicy" disabled><option value="keep-local">로컬 번역 유지 (기본)</option><option value="use-incoming">파일 번역으로 덮어쓰기</option></select></label>
+      </div>
+      <div class="button-row"><button id="importCache" type="button" disabled>파일 가져오기</button><button id="exportCache" type="button" class="secondary" disabled>NDJSON 백업</button><button id="cancelTransfer" type="button" class="danger quiet" hidden>작업 취소</button></div>
+      <p id="transferProgress" class="note" aria-live="polite">큰 작업 전 새 탭으로 여세요. 완료될 때까지 팝업·탭을 닫지 마세요.</p>
+      <p class="note">백업에는 원문·번역문과 수동 수정이 포함됩니다. 순차 저장 미지원 환경의 다운로드는 32 MiB까지만 가능합니다.</p>
+    </section>
+    <section class="card" aria-labelledby="editorHeading">
+      <h2 id="editorHeading">번역 찾기 · 수정</h2>
+      <form id="searchForm">
+        <label>검색어<textarea id="searchQuery" rows="2" placeholder="원문 또는 번역문 (빈칸이면 전체)" maxlength="256" disabled></textarea></label>
+        <div class="two-columns"><label>검색 방식<select id="searchMode" disabled><option value="contains">원문·번역문 일부 일치</option><option value="exact">원문 정확히 일치</option></select></label><label>언어 필터<input id="searchTarget" maxlength="64" placeholder="비우면 모든 언어" disabled autocomplete="off"></label></div>
+        <div class="action-row"><span class="muted">한 번에 최대 20개 · 범위를 나누어 조회</span><button id="searchCache" type="submit" disabled>검색</button></div>
+      </form>
+      <p id="searchSummary" class="note" aria-live="polite">검색을 누르면 저장된 번역을 확인할 수 있습니다.</p>
+      <ul id="searchResults" class="results" aria-label="검색 결과"></ul>
+      <button id="searchNext" type="button" class="secondary wide" hidden disabled>다음 범위 검색</button>
+      <form id="editForm" class="edit-panel" hidden>
+        <div class="action-row"><h3>선택한 번역</h3><span id="entryMeta" class="muted"></span></div>
+        <label>대상 언어 (변경 불가)<input id="entryTarget" readonly></label>
+        <label>원문 (변경 불가)<textarea id="entrySource" rows="4" readonly></textarea></label>
+        <label>번역문<textarea id="entryText" rows="5" required disabled aria-describedby="editHint"></textarea></label>
+        <p id="editHint" class="note">수치·태그·일반 변수·줄바꿈의 내용과 순서를 유지하세요. {USER}는 위치를 옮길 수 있지만 개수는 같아야 합니다. 저장 실패 시 초안은 유지됩니다.</p>
+        <div id="conflictNotice" class="conflict" hidden><p>다른 작업으로 이 항목이 변경되었거나 삭제되었습니다. 현재 초안은 유지했습니다. 복사해 두거나, 확인 후 최신 항목을 다시 불러오세요.</p><button id="reloadEntry" type="button" class="secondary">최신 항목 다시 불러오기</button></div>
+        <div class="button-row"><button id="saveEntry" type="submit" disabled>번역 저장</button><button id="deleteEntry" type="button" class="danger secondary" disabled>번역 삭제</button><button id="closeEntry" type="button" class="quiet" disabled>닫기</button></div>
+      </form>
+    </section>
+    <p id="status" role="status" aria-live="polite" aria-atomic="true" data-kind="info">로컬 캐시를 불러오는 중…</p>
+    <button id="retryLoad" type="button" class="secondary" hidden>다시 연결</button>
+  </main>
+  <footer>캐시 전용 · 원본 확장과 별도 저장</footer>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>Mini synthetic Cocos game</title><style>body{font:20px sans-serif;margin:40px}section{padding:20px;border:1px solid #aaa;margin:16px 0}small{font-size:14px}</style></head>
+<body><h1>Mini synthetic Cocos game</h1><small>합성 텍스트 · 실제 게임/계정/서버 연결 없음</small><section id="story">物語開始</section><section id="skill">攻撃10%</section><section id="missing">未収録文章</section><section id="playerName">テスト</section><section id="namedSentence">テストさん、ようこそ</section><script>
+(() => {
+  class Base {get string(){return this._text || '';}set string(value){this._text=String(value);if(this.element)this.element.textContent=this._text;}}
+  class Label extends Base {} class RichText extends Base {}
+  const scene={children:[],_components:[],parent:null},labels={};
+  for(const id of ['story','skill','missing','playerName','namedSentence']) {
+    const label=new Label(),node={children:[],_components:[label],parent:scene,activeInHierarchy:true};
+    label.node=node;label.element=document.getElementById(id);
+    Object.assign(label,{font:null,fontFamily:'sans-serif',useSystemFont:true,fontSize:20,cacheMode:0});
+    label.string=label.element.textContent;scene.children.push(node);labels[id]=label;
+  }
+  window.cc={Label,RichText,isValid:()=>true,director:{getScene:()=>scene}};
+  const profile={mainCharacterName:'テスト',userName:'AccountTest'};
+  window.__require=name=>{
+    if(name!=='UserUtils')throw Error('Unknown synthetic module');
+    return {getUserBasicData:()=>({getMainCharacterName:()=>profile.mainCharacterName,getUserName:()=>profile.userName})};
+  };
+  window.mockGame={labels,scene,profile,setPlayer(name){profile.mainCharacterName=name;labels.playerName.string=name;labels.namedSentence.string=name+'さん、ようこそ';}};
+})();
+</script></body></html>

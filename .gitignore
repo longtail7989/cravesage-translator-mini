@@ -1,0 +1,11 @@
+dist/
+node_modules/
+.tmp/
+.env
+.env.*
+*.ndjson
+*.jsonl
+*.log
+*.har
+*.db
+*.sqlite
