@@ -1,4 +1,6 @@
 import {hashKey,protect,VERSION,unchangedJapanese} from './core.mjs';
+import './dialogue-text.js';
+const dialogue=globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')];
 export const CACHE_FORMAT='crave-ai-translation-cache';
 export const CACHE_FILE_VERSION=3;
 export const CACHE_MAX_FILE_BYTES=32*1024*1024;
@@ -20,20 +22,29 @@ export function cacheIdentityV2(target,source,context=''){return JSON.stringify(
 export async function cacheIdV2(target,source,context=''){return 'v2:'+await hashKey(cacheIdentityV2(target,source,context));}
 export function cacheIdentityV3(target,source){return JSON.stringify(['crave-cache-v3',target,source]);}
 export async function cacheId(target,source){return 'v3:'+await hashKey(cacheIdentityV3(target,source));}
-export function validateTextPair(source,text){
+export function validateTextShape(source,text){
   if(typeof source!=='string'||!source.trim()||source.length>8192||typeof text!=='string'||!text.trim()||text.length>Math.max(512,source.length*6))throw Error('캐시 원문·번역문의 길이가 올바르지 않습니다.');
-  const a=protect(source,'CHECK').values.map(x=>x.value),b=protect(text,'CHECK').values.map(x=>x.value);
-  // A localized player name can move across lines; all other protected values stay ordered.
-  const ordinaryA=a.filter(value=>value!=='{USER}'),ordinaryB=b.filter(value=>value!=='{USER}');
-  if(a.length-ordinaryA.length!==b.length-ordinaryB.length||JSON.stringify(ordinaryA)!==JSON.stringify(ordinaryB))throw Error('캐시에 수치·태그·변수·줄바꿈 또는 이름 자리표시자 개수가 바뀐 번역이 있어 불러오기를 중단했습니다.');
+  return true;
+}
+export function hasTextPairWarning(source,text){
+  try{
+    const a=protect(source,'CHECK').values.map(x=>x.value),b=protect(text,'CHECK').values.map(x=>x.value);
+    // A localized player name can move across lines; all other protected values stay ordered.
+    const ordinaryA=a.filter(value=>value!=='{USER}'),ordinaryB=b.filter(value=>value!=='{USER}');
+    return a.length-ordinaryA.length!==b.length-ordinaryB.length||JSON.stringify(ordinaryA)!==JSON.stringify(ordinaryB);
+  }catch{return true;}
+}
+export function validateTextPair(source,text){
+  validateTextShape(source,text);
+  if(hasTextPairWarning(source,text))throw Error('캐시 원문과 번역문의 수치·태그·변수·줄바꿈 또는 이름 자리표시자 개수가 일치하지 않습니다.');
   return true;
 }
 export async function makeCacheEntry({source,context='',target,text,createdAt=Date.now(),updatedAt=Date.now(),manual}){
   if(typeof target!=='string'||!target.trim()||target!==target.trim()||target.length>64||typeof context!=='string'||context.length>300)throw Error('캐시 언어·문맥이 올바르지 않습니다.');
   if(manual!==undefined&&typeof manual!=='boolean')throw Error('캐시 수동 편집 표시가 올바르지 않습니다.');
-  validateTextPair(source,text);
+  validateTextShape(source,text);
   if(!Number.isSafeInteger(createdAt)||createdAt<0||!Number.isSafeInteger(updatedAt)||updatedAt<0||updatedAt<createdAt)throw Error('캐시 시간 정보가 올바르지 않습니다.');
-  return {id:await cacheId(target,source),source,context,target,text,createdAt,updatedAt,time:updatedAt,reverseTime:Number.MAX_SAFE_INTEGER-updatedAt,...(manual===true?{manual:true}:{})};
+  return indexedCacheEntry({id:await cacheId(target,source),source,context,target,text,createdAt,updatedAt,...(manual===true?{manual:true}:{})});
 }
 export function isModernEntry(e){return plain(e)&&typeof e.id==='string'&&/^v[23]:[a-f0-9]{64}$/.test(e.id)&&typeof e.source==='string'&&typeof e.target==='string'&&typeof e.context==='string';}
 export function portableEntry(e){return {id:e.id,source:e.source,context:e.context,target:e.target,text:e.text,createdAt:e.createdAt,updatedAt:e.updatedAt,...(e.manual===true?{manual:true}:{})};}
@@ -51,7 +62,7 @@ export function checkPortableShape(raw){
   if(!plain(raw)||!keysOnly(raw,[...fields,...optionalFields])||!fields.every(k=>Object.hasOwn(raw,k)))throw Error('캐시 항목에 필수 필드가 없거나 지원하지 않는 필드가 있습니다.');
   if(Object.hasOwn(raw,'manual')&&typeof raw.manual!=='boolean')throw Error('캐시 수동 편집 표시가 올바르지 않습니다.');
   // Reject oversized or hostile records before serializing them for byte accounting.
-  validateTextPair(raw.source,raw.text);
+  validateTextShape(raw.source,raw.text);
   if(typeof raw.id!=='string'||raw.id.length!==67||typeof raw.context!=='string'||raw.context.length>300||typeof raw.target!=='string'||raw.target.length>64)throw Error('캐시 항목의 필드 길이가 올바르지 않습니다.');
 }
 export async function validatePortableEntries(raws){
@@ -81,4 +92,12 @@ export async function validateImport(data){
   return validatePortableEntries(data.entries);
 }
 
-export const indexedCacheEntry=entry=>({...entry,time:entry.updatedAt,reverseTime:Number.MAX_SAFE_INTEGER-entry.updatedAt});
+// Derived fields are local-only: never change portable identities, context or text bytes.
+export function indexedCacheEntry(entry){
+  const indexed={...entry,time:entry.updatedAt,reverseTime:Number.MAX_SAFE_INTEGER-entry.updatedAt};
+  delete indexed.dialogueKey;delete indexed.manualRank;
+  if(!hasTextPairWarning(entry.source,entry.text)&&(entry.manual===true||!unchangedJapanese(entry.source,entry.text,entry.target))){
+    indexed.dialogueKey=dialogue.key(entry.source);indexed.manualRank=entry.manual===true?0:1;
+  }
+  return indexed;
+}

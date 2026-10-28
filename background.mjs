@@ -47,7 +47,7 @@ export function createBackend(chromeApi=globalThis.chrome,{cache=createCacheStor
     if(!Array.isArray(items)||items.length>32)throw invalid('캐시 조회는 한 번에 최대 32개입니다.');
     let chars=0;const ids=new Set();
     for(const item of items){
-      if(!isPlainObject(item)||Object.keys(item).some(key=>!['id','source','context'].includes(key))||typeof item.id!=='string'||!item.id||item.id.length>80||ids.has(item.id)||typeof item.source!=='string'||!item.source.trim()||item.source.length>8192||(item.context!==undefined&&(typeof item.context!=='string'||item.context.length>300)))throw invalid('캐시 조회 항목이 올바르지 않습니다.');
+      if(!isPlainObject(item)||Object.keys(item).some(key=>!['id','source','context','exactOnly'].includes(key))||typeof item.id!=='string'||!item.id||item.id.length>80||ids.has(item.id)||typeof item.source!=='string'||!item.source.trim()||item.source.length>8192||(item.context!==undefined&&(typeof item.context!=='string'||item.context.length>300))||(Object.hasOwn(item,'exactOnly')&&typeof item.exactOnly!=='boolean'))throw invalid('캐시 조회 항목이 올바르지 않습니다.');
       ids.add(item.id);chars+=item.source.length;
     }
     if(chars>131072)throw invalid('캐시 조회 원문은 합계 131,072자 이하여야 합니다.');
@@ -58,6 +58,7 @@ export function createBackend(chromeApi=globalThis.chrome,{cache=createCacheStor
     CACHE_SEARCH:['query','target','mode','cursor','limit'],CACHE_GET:['id'],
     CACHE_EDIT_SAVE:['id','source','target','text','expectedUpdatedAt','expectedText'],
     CACHE_DELETE:['id','source','target','expectedUpdatedAt','expectedText'],
+    CACHE_CLEAR:['confirmed'],
     IMPORT_CACHE:['data','mode','conflictPolicy','confirmed'],IMPORT_START:['mode','conflictPolicy','confirmed'],
     IMPORT_BATCH:['token','entries'],IMPORT_COMMIT:['token','header','expectedCount','confirmed'],IMPORT_ABORT:['token'],
     EXPORT_START:[],EXPORT_PAGE:['token','cursor'],EXPORT_END:['token']
@@ -77,17 +78,18 @@ export function createBackend(chromeApi=globalThis.chrome,{cache=createCacheStor
     }
     if(message.type==='CACHE_LOOKUP'){
       const items=lookupItems(message.items),settings={...currentSettings},epoch=cacheEpoch;
-      const results=await Promise.all(items.map(async item=>{const hit=settings.enabled?await cache.lookup(item,settings):null;return hit?{id:item.id,text:hit.text,cached:true}:{id:item.id,missing:true};}));
+      const results=await Promise.all(items.map(async item=>{const hit=settings.enabled?await cache.lookup(item,{...settings,exactOnly:item.exactOnly===true}):null;return hit?{id:item.id,text:hit.text,cached:true}:{id:item.id,missing:true};}));
       return {results,cacheEpoch:epoch};
     }
     return locked(async()=>{
       switch(message.type){
-        case 'GET_STATE':return {settings:{...currentSettings},cacheCount:await cache.count(),version:VERSION};
+        case 'GET_STATE':return {settings:{...currentSettings},cacheCount:await cache.count(),version:VERSION,capabilities:{cacheClear:true,warningImports:true}};
         case 'SAVE_SETTINGS':return changed(async()=>{if(!isPlainObject(message.settings))throw invalid();const settings=sanitizeSettings(message.settings);await chromeApi.storage.local.set({settings});currentSettings=settings;return {};}).then(()=>({config:config()}));
         case 'CACHE_SEARCH':return editor.search({query:message.query===undefined?'':message.query,target:message.target,mode:message.mode===undefined?'contains':message.mode,cursor:message.cursor===undefined?null:message.cursor,limit:message.limit===undefined?20:message.limit});
         case 'CACHE_GET':return editor.get({id:message.id});
         case 'CACHE_EDIT_SAVE':return changed(()=>editor.save(message));
         case 'CACHE_DELETE':return changed(()=>editor.remove(message));
+        case 'CACHE_CLEAR':if(message.confirmed!==true)throw invalid('캐시 전체 초기화에는 명시적인 확인이 필요합니다.');return changed(()=>cache.clear());
         case 'IMPORT_CACHE':{const options=importOptions(message);return changed(()=>cache.import(message.data,options.mode,options));}
         case 'IMPORT_START':{const options=importOptions(message);return transfers.importStart(options.mode,options);}
         case 'IMPORT_BATCH':return transfers.importStage(message.token,message.entries);

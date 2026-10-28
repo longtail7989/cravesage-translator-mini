@@ -1,7 +1,7 @@
 import {VERSION} from './core.mjs';
 import {validateConflictPolicy} from './cache-store.mjs';
-import {CACHE_FORMAT,CACHE_FILE_VERSION,normalizeCacheHeader,validatePortableEntries,preferredEntry,indexedCacheEntry,checkPortableShape,byteSize} from './cache.mjs';
-const META='cache-metadata',STAGE='imports',LIVE='translations',TTL=5*60*1000;
+import {CACHE_FORMAT,CACHE_FILE_VERSION,normalizeCacheHeader,validatePortableEntries,preferredEntry,indexedCacheEntry,checkPortableShape,hasTextPairWarning,byteSize} from './cache.mjs';
+const META='cache-metadata',STAGE='imports',LIVE='translations',DELETED='deleted-source:',TTL=5*60*1000;
 function transact(db,names,mode,work){return new Promise((resolve,reject)=>{
   const tx=db.transaction(names,mode);let result,error;
   const fail=e=>{error=e;try{tx.abort();}catch{reject(e);}};
@@ -25,13 +25,17 @@ export function createCacheTransfer(cache){
     const tokens=[],r=tx.objectStore(META).openCursor();r.onsuccess=()=>{const c=r.result;if(c){if(typeof c.value?.id==='string'&&c.value.id.startsWith('transfer:')&&(all||c.value.expires<Date.now()))tokens.push(c.value.token);c.continue();}};set(()=>tokens);
   });for(const token of expired)await purge(token);}
   async function getJob(token,kind){const db=await cache._database(),id=tokenId(token);return transact(db,META,'readonly',(tx,set,fail)=>{const r=tx.objectStore(META).get(id);r.onsuccess=()=>{try{jobValid(r.result,kind);set(r.result);}catch(e){fail(e);}};});}
-  async function saveJob(job){const db=await cache._database();job.expires=Date.now()+TTL;return transact(db,META,'readwrite',tx=>{tx.objectStore(META).put(job);});}
+  async function saveJob(job,{create=false}={}){const db=await cache._database();job.expires=Date.now()+TTL;return transact(db,META,'readwrite',(tx,set,fail)=>{
+    const meta=tx.objectStore(META);
+    if(create){meta.put(job);return;}
+    const request=meta.get(job.id);request.onsuccess=()=>{try{jobValid(request.result,job.kind);meta.put(job);}catch(error){fail(error);}};
+  });}
   return {
     cleanup:({all=false}={})=>run(()=>cleanup(all)),
-    exportStart:()=>run(async()=>{await cleanup();const token=crypto.randomUUID(),header={format:CACHE_FORMAT,version:CACHE_FILE_VERSION,identity:'source-v3',exportedAt:new Date().toISOString(),appVersion:VERSION};const count=await cache.count();await saveJob({id:tokenId(token),token,kind:'export',cursor:null,done:false,expires:Date.now()+TTL});return {token,header,count,countIsExact:false};}),
+    exportStart:()=>run(async()=>{await cleanup();const token=crypto.randomUUID(),header={format:CACHE_FORMAT,version:CACHE_FILE_VERSION,identity:'source-v3',exportedAt:new Date().toISOString(),appVersion:VERSION};const count=await cache.count();await saveJob({id:tokenId(token),token,kind:'export',cursor:null,done:false,expires:Date.now()+TTL},{create:true});return {token,header,count,countIsExact:false};}),
     exportNext:({token,cursor=null})=>run(async()=>{await cleanup();const job=await getJob(token,'export');if(job.done||cursor!==job.cursor)throw Error('캐시 파일 페이지 순서가 올바르지 않습니다. 다시 시작하세요.');const page=await cache.exportPage({cursor,limit:250,maxBytes:1024*1024});await saveJob({...job,cursor:page.cursor,done:page.done});return page;}),
     exportEnd:token=>run(async()=>{await purge(token);return {};}),
-    importStart:(mode,{conflictPolicy='keep-local',confirmed=false}={})=>run(async()=>{validateConflictPolicy(conflictPolicy);if(!['merge','replace'].includes(mode)||mode==='replace'&&confirmed!==true)throw Object.assign(Error('전체 교체에는 명시적인 확인이 필요합니다.'),{code:'INVALID'});await cleanup();const token=crypto.randomUUID();await saveJob({id:tokenId(token),token,kind:'import',mode,conflictPolicy,confirmed:confirmed===true,inputCount:0,stagedCount:0,expires:Date.now()+TTL});return {token};}),
+    importStart:(mode,{conflictPolicy='keep-local',confirmed=false}={})=>run(async()=>{validateConflictPolicy(conflictPolicy);if(!['merge','replace'].includes(mode)||mode==='replace'&&confirmed!==true)throw Object.assign(Error('전체 교체에는 명시적인 확인이 필요합니다.'),{code:'INVALID'});await cleanup();const token=crypto.randomUUID();await saveJob({id:tokenId(token),token,kind:'import',mode,conflictPolicy,confirmed:confirmed===true,inputCount:0,stagedCount:0,expires:Date.now()+TTL},{create:true});return {token};}),
     importStage:(token,rows)=>run(async()=>{
       await cleanup();await getJob(token,'import');
       if(!Array.isArray(rows)||rows.length>1000)throw Error('캐시 불러오기 배치는 최대 1,000개입니다.');
@@ -47,14 +51,14 @@ export function createCacheTransfer(cache){
       normalizeCacheHeader(header,{stream:true});if(!Number.isSafeInteger(expectedCount)||expectedCount<0)throw Error('캐시 파일 종료 개수를 확인할 수 없습니다.');
       await cleanup();const db=await cache._database(),id=tokenId(token);
       return transact(db,[STAGE,META,LIVE],'readwrite',(tx,set,fail)=>{
-        const stage=tx.objectStore(STAGE),meta=tx.objectStore(META),live=tx.objectStore(LIVE);let job,after=null,imported=0,cacheCount=0,savedCount=0,added=0,processed=0;
-        const finish=()=>{if(processed!==job.stagedCount){fail(Error('임시 캐시 항목 수가 일치하지 않습니다. 기존 캐시는 유지됩니다.'));return;}cacheCount=job.mode==='replace'?imported:savedCount+added;if(!Number.isSafeInteger(cacheCount)){fail(Error('캐시 개수가 너무 큽니다.'));return;}meta.put({id:'translation-count',count:cacheCount});meta.delete(id);set(()=>({imported,skipped:job.inputCount-imported,cacheCount}));};
+        const stage=tx.objectStore(STAGE),meta=tx.objectStore(META),live=tx.objectStore(LIVE);let job,after=null,imported=0,cacheCount=0,savedCount=0,added=0,processed=0,validationWarnings=0;
+        const finish=()=>{if(processed!==job.stagedCount){fail(Error('임시 캐시 항목 수가 일치하지 않습니다. 기존 캐시는 유지됩니다.'));return;}cacheCount=job.mode==='replace'?imported:savedCount+added;if(!Number.isSafeInteger(cacheCount)){fail(Error('캐시 개수가 너무 큽니다.'));return;}meta.put({id:'translation-count',count:cacheCount});meta.delete(id);set(()=>({imported,skipped:job.inputCount-imported,cacheCount,validationWarnings}));};
         const nextPage=()=>{const bounds=IDBKeyRange.bound([token,after||''],[token,'\uffff'],after!==null,false),r=stage.getAll(bounds,256);
           r.onsuccess=()=>{const batch=r.result;if(!batch.length){finish();return;}after=batch[batch.length-1].id;let pending=batch.length;
             const done=()=>{if(--pending===0)nextPage();};
             for(const row of batch){if(row.token!==token||row.entry?.id!==row.id){fail(Error('임시 캐시 항목이 올바르지 않습니다.'));return;}
               processed++;
-              const write=old=>{if(job.mode==='replace'||job.conflictPolicy==='use-incoming'||!old){live.put(row.entry);imported++;if(!old)added++;}stage.delete([token,row.id]);done();};
+              const write=old=>{if(job.mode==='replace'||job.conflictPolicy==='use-incoming'||!old){live.put(indexedCacheEntry(row.entry));meta.delete(DELETED+row.id);imported++;if(hasTextPairWarning(row.entry.source,row.entry.text))validationWarnings++;if(!old)added++;}stage.delete([token,row.id]);done();};
               if(job.mode==='replace')write(null);else{const q=live.get(row.id);q.onsuccess=()=>write(q.result);}
             }
           };

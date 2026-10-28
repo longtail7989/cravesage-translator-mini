@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "크레이브사가 번역기 Mini",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "저장된 번역 캐시만 적용합니다. 캐시 파일 병합과 팝업 번역 수정을 지원하며 AI에 연결하지 않습니다.",
   "minimum_chrome_version": "116",
   "permissions": ["storage"],
@@ -15,7 +15,7 @@
   "content_scripts": [
     {
       "matches": ["https://gg-client-r.crave-saga.net/client/*/index_dmm.html"],
-      "js": ["name-policy.js", "main.js"],
+      "js": ["name-policy.js", "dialogue-text.js", "story-text.js", "main.js"],
       "all_frames": true,
       "world": "MAIN",
       "run_at": "document_idle"
@@ -27,6 +27,9 @@
       "world": "ISOLATED",
       "run_at": "document_idle"
     }
+  ],
+  "web_accessible_resources": [
+    {"resources": ["dialogue-text.js"], "matches": ["https://gg-client-r.crave-saga.net/*"]}
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; connect-src 'none'"

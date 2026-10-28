@@ -1,6 +1,6 @@
 // Trusted extension backend only. No provider calls or settings changes.
 import {cacheId,makeCacheEntry,portableEntry,indexedCacheEntry,validateTextPair,byteSize} from './cache.mjs';
-const META='cache-metadata',COUNTER='translation-count',MAX_SCAN=512,MAX_BYTES=2*1024*1024;
+const META='cache-metadata',COUNTER='translation-count',DELETED='deleted-source:',MAX_SCAN=512,MAX_BYTES=2*1024*1024;
 const validId=id=>typeof id==='string'&&/^v3:[a-f0-9]{64}$/.test(id);
 const targetOK=t=>typeof t==='string'&&!!t.trim()&&t===t.trim()&&t.length<=64;
 const safeTime=t=>Number.isSafeInteger(t)&&t>=0;
@@ -79,6 +79,7 @@ export function createCacheEditor(cache){
           if(!safeTime(n.result?.count)||n.result.count<1){fail(storageError());return;}
           cacheCount=n.result.count;
           store.put(indexedCacheEntry(entry));
+          counter.delete(DELETED+id);
         };
       };set(()=>({entry:portableEntry(entry),version:{updatedAt:entry.updatedAt,text:entry.text},cacheCount}));
     });
@@ -102,7 +103,7 @@ export function createCacheEditor(cache){
         n.onsuccess=()=>{
           if(!safeTime(n.result?.count)||n.result.count<1){fail(storageError());return;}
           cacheCount=n.result.count-1;
-          store.delete(id);counter.put({id:COUNTER,count:cacheCount});
+          store.delete(id);counter.put({id:COUNTER,count:cacheCount});counter.put({id:DELETED+id});
         };
       };set(()=>({deleted:1,source,target,cacheCount}));
     });

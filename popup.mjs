@@ -1,10 +1,11 @@
 import {importCacheFile, exportCacheFile} from './file-transfer.mjs';
-import {sanitizeSettings} from './core.mjs';
+import {VERSION, sanitizeSettings} from './core.mjs';
 
 const $ = id => document.getElementById(id);
 const number = value => new Intl.NumberFormat('ko-KR').format(value);
 let loaded = false, busy = false, savedSettings = null, selected = null, selectionVersion = null;
 let searchRequest = null, nextCursor = null, scannedTotal = 0, transferController = null;
+let reloadRequired = false;
 
 async function send(type, payload = {}) {
   const response = await chrome.runtime.sendMessage({type, ...payload});
@@ -25,7 +26,7 @@ function updateCount(response) {
 function syncControls() {
   document.querySelectorAll('button,input,select,textarea').forEach(element => {
     if (element.id === 'cancelTransfer') element.disabled = !transferController || transferController.signal.aborted;
-    else if (element.id === 'retryLoad') element.disabled = busy;
+    else if (element.id === 'retryLoad' || element.id === 'reloadExtension') element.disabled = busy;
     else element.disabled = busy || !loaded;
   });
   $('searchNext').disabled = busy || !loaded || nextCursor === null;
@@ -137,6 +138,16 @@ async function load() {
   syncControls();
   try {
     const response = await send('GET_STATE');
+    reloadRequired = response.version !== VERSION || response.capabilities?.cacheClear !== true || response.capabilities?.warningImports !== true;
+    $('reloadNotice').hidden = !reloadRequired;
+    if (reloadRequired) {
+      loaded = false;
+      $('version').textContent = `팝업 v${VERSION} / 백그라운드 v${response.version ?? '알 수 없음'}`;
+      updateCount(response);
+      $('retryLoad').hidden = true;
+      status('실행 중인 백그라운드가 현재 팝업과 맞지 않습니다. 상단의 확장 다시 로드를 누른 뒤 팝업을 다시 여세요. 캐시와 설정은 유지됩니다.', 'error');
+      return;
+    }
     savedSettings = response.settings;
     $('enabled').checked = savedSettings.enabled;
     $('target').value = savedSettings.target;
@@ -198,8 +209,9 @@ $('importCache').addEventListener('click', () => {
       clearSelection();
       invalidateSearch();
       $('cacheFile').value = '';
-      $('transferProgress').textContent = '가져오기 완료 · ' + (mode === 'replace' ? '전체 교체' : conflictPolicy === 'keep-local' ? '병합 · 로컬 번역 유지' : '병합 · 파일 번역 우선');
-      status(`${number(response.imported)}개 반영 · ${number(response.skipped)}개 건너뜀 · 현재 ${number(response.cacheCount)}개`, 'success');
+      const warnings = response.validationWarnings;
+      $('transferProgress').textContent = '가져오기 완료 · ' + (mode === 'replace' ? '전체 교체' : conflictPolicy === 'keep-local' ? '병합 · 로컬 번역 유지' : '병합 · 파일 번역 우선') + ` · 내용 차이 경고 ${number(warnings)}개`;
+      status(`${number(response.imported)}개 반영 · ${number(response.skipped)}개 건너뜀 · 현재 ${number(response.cacheCount)}개. 반영한 항목 중 원문·번역문의 수치·태그·변수·줄바꿈 차이 경고 ${number(warnings)}개. 파일 번역문은 변경하지 않았으며 경고 항목도 그대로 반영했습니다.`, warnings > 0 ? 'info' : 'success');
     } catch (error) {
       $('transferProgress').textContent = '가져오기 중단 · 반영 전 검증 실패 시 기존 캐시는 유지됩니다.';
       throw error;
@@ -227,6 +239,21 @@ $('cancelTransfer').addEventListener('click', () => {
   transferController?.abort();
   $('cancelTransfer').disabled = true;
   $('transferProgress').textContent = '취소 요청 중 · 이미 시작된 최종 반영은 완료될 수 있습니다.';
+});
+$('clearCache').addEventListener('click', () => {
+  if (busy || !loaded) return;
+  if (!window.confirm('캐시 전체 초기화: 모든 언어의 저장된 번역과 수동 수정, 저장하지 않은 번역 초안을 삭제합니다. 진행 중인 가져오기·내보내기도 중단되며 게임에 이미 불러온 번역 기억도 초기화됩니다. 되돌릴 수 없으므로 필요한 캐시는 먼저 백업하세요. 저장한 설정과 아직 저장하지 않은 설정 입력값, 디스크의 캐시·백업 파일은 그대로 유지됩니다. 캐시를 모두 삭제할까요?')) return;
+  void run(async () => {
+    const response = await send('CACHE_CLEAR', {confirmed: true});
+    updateCount(response);
+    clearSelection();
+    $('entryMeta').textContent = '';
+    invalidateSearch();
+    $('searchSummary').textContent = '캐시가 비어 있습니다. 파일을 가져오면 다시 검색할 수 있습니다.';
+    $('cacheFile').value = '';
+    $('transferProgress').textContent = '캐시 전체 초기화 완료 · 진행 중이던 가져오기·내보내기는 중단되었습니다.';
+    status('캐시를 모두 삭제했습니다. 현재 0개이며 게임의 번역 기억을 초기화했습니다. 저장한 설정과 저장하지 않은 설정 입력값, 디스크의 캐시·백업 파일은 유지됩니다.', 'success');
+  });
 });
 $('searchMode').addEventListener('change', () => {
   $('searchQuery').maxLength = $('searchMode').value === 'exact' ? 8192 : 256;
@@ -291,6 +318,11 @@ $('openTab').addEventListener('click', () => {
   void chrome.tabs.create({url: chrome.runtime.getURL('popup.html')}).catch(fail);
 });
 $('retryLoad').addEventListener('click', () => { void load(); });
+$('reloadExtension').addEventListener('click', () => {
+  if (busy || !reloadRequired) return;
+  try { chrome.runtime.reload(); }
+  catch (error) { status(`확장 다시 로드 실패: ${error.message}. chrome://extensions에서 Mini의 새로고침을 눌러 주세요.`, 'error'); }
+});
 window.addEventListener('pagehide', () => { transferController?.abort(); });
 window.addEventListener('beforeunload', event => {
   if (transferController || isDirty()) { event.preventDefault(); event.returnValue = ''; }

@@ -7,6 +7,8 @@
   const CHANNEL = 'cravesage-translator-mini/v1';
   if (window[APP]) return;
   const namesPolicy = globalThis[Symbol.for('cravesage-translator-mini.names.v1')];
+  const dialogue = globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')];
+  const storyText = globalThis[Symbol.for('cravesage-translator-mini.story-text.v1')];
   const MAX_ENTRIES = 5000, MAX_BYTES = 8 * 1024 * 1024;
   const records = new Map(), bySource = new Map(), memory = new Map(), pending = new Map(), requests = new Map();
   const hooks = [], engineEvents = [];
@@ -16,6 +18,15 @@
   let memoryBytes = 0, recordBytes = 0, pendingBytes = 0, heartbeat = null, lightTimer = null, burstTimer = null;
   let lastScan = 0, lastLight = 0, burstUntil = 0, attachAttempts = 0;
   const styleKeys = ['font', 'fontFamily', 'useSystemFont', 'fontSize', 'lineHeight', 'cacheMode', 'enableWrapText', 'overflow'];
+  const story = storyText.create({getEngine: () => engine, getRecords: () => records});
+  const memoryKey = (source, isStory, exactOnly) => (isStory ? exactOnly ? 'se\0' : 'sf\0' : 'n\0') + source;
+  const recordSize = record => [record.raw, record.native, record.display, record.templateText, record.fullDisplay].reduce((size, text) => size + (typeof text === 'string' ? text.length * 2 : 0), 0) + (record.typingPlan ? record.typingPlan.bytes + record.typingPlan.display.length * 2 : 0);
+  function resetRecord(record) {
+    recordBytes -= recordSize(record);
+    record.checked = false; record.missing = false;
+    record.templateText = null; record.fullDisplay = null; delete record.typingPlan;
+    recordBytes += recordSize(record);
+  }
   const emit = (type, payload = {}) => window.postMessage({channel: CHANNEL, from: 'engine', type, ...payload}, location.origin);
   const valid = value => !!value && (!engine?.isValid || engine.isValid(value));
   const active = label => valid(label) && label.node?.activeInHierarchy !== false;
@@ -42,7 +53,7 @@
   function clearMemory() { memory.clear(); memoryBytes = 0; pendingBytes = 0; pending.clear(); requests.clear(); }
   function resetTranslations() {
     generation++; restoreAll(); clearMemory();
-    for (const record of records.values()) { record.checked = false; record.missing = false; }
+    for (const record of records.values()) resetRecord(record);
   }
   function readNames() {
     const names = [];
@@ -55,7 +66,7 @@
         for (const [method, kind] of [['getMainCharacterName', 'mainCharacterName'], ['getUserName', 'userName']]) {
           try {
             const name = typeof profile?.[method] === 'function' && profile[method]();
-            if (typeof name === 'string' && name.trim() && name.length <= 64 && !names.includes(name)) {
+            if (namesPolicy.usable(name) && !names.includes(name)) {
               names.push(name); if (source === 'none') source = kind;
             }
           } catch {}
@@ -91,14 +102,14 @@
   }
   function display(label, record, text) {
     const extra = (text.length - record.display.length) * 2;
-    if (extra > 0 && !room(extra, 0)) text = record.raw;
+    if (extra > 0 && !room(extra, 0)) text = record.native;
     const previousBusy = busy; busy = true;
     try {
-      if (text !== record.raw && config.fontFamily.trim() && !record.style) {
+      if (text !== record.native && config.fontFamily.trim() && !record.style) {
         record.style = {};
         for (const key of styleKeys) if (key in label) record.style[key] = label[key];
       }
-      if (text !== record.raw && config.fontFamily.trim()) {
+      if (text !== record.native && config.fontFamily.trim()) {
         for (const [key, value] of Object.entries({font: null, useSystemFont: true, fontFamily: config.fontFamily, cacheMode: 0})) {
           if (key in label && label[key] !== value) label[key] = value;
         }
@@ -120,7 +131,7 @@
   function forget(label, record, restore = false) {
     if (restore && valid(label)) restoreRecord(label, record);
     if (!records.has(label)) return;
-    unindex(label, record); records.delete(label); recordBytes -= entryBytes(record.raw, record.display);
+    unindex(label, record); records.delete(label); recordBytes -= recordSize(record);
   }
   function restoreRecord(label, record) {
     // A native game write that bypassed our setter is newer than our last display.
@@ -131,7 +142,7 @@
       forget(label, record);
       return;
     }
-    display(label, record, record.raw);
+    display(label, record, record.native);
   }
   function restoreAll() { for (const [label, record] of records) if (valid(label)) restoreRecord(label, record); }
   function context(label) {
@@ -145,55 +156,100 @@
     }
     return [...new Set(names)].slice(0, 5).join(' / ').slice(0, 280);
   }
-  function ask(label, record, response = null) {
-    if (!config.enabled || !config.ready || stopped || !active(label) || richChild(label) || !candidate(record.raw) || record.checked) return;
-    for (const choice of choices(record)) {
-      const text = response?.source === choice.source ? response.text : recalled(choice.source);
-      if (text !== undefined) {
-        if (text === null) continue;
-        const rendered = namesPolicy.render(text, config.displayName.trim() ? config.displayName : choice.name);
-        if (rendered === null) continue;
-        record.checked = true; record.missing = false; display(label, record, rendered); return;
-      }
-      const existing = pending.get(choice.source);
-      if (existing) { existing.bindings.set(record.raw, choice.name); return; }
-      if (!room(entryBytes(choice.source, null))) { record.checked = true; record.missing = true; return; }
-      const id = 'g' + generation + 'r' + (++sequence);
-      const request = {id, source: choice.source, generation, bindings: new Map([[record.raw, choice.name]])};
-      pending.set(choice.source, request); requests.set(id, request);
-      pendingBytes += entryBytes(choice.source, null);
-      emit('LOOKUP', {cacheEpoch: config.cacheEpoch, item: {id, source: choice.source, context: context(label)}});
+  function revealRecord(label, record) {
+    const before = recordSize(record);
+    const text = story.reveal(label, record.native, record.fullDisplay);
+    const extra = recordSize(record) - before;
+    if (extra > 0 && !room(extra + Math.max(0, (text.length - record.display.length) * 2), 0)) {
+      // Retain the native frame, not an unbudgeted plan or an unanimated full target.
+      delete record.typingPlan;
+      recordBytes += recordSize(record) - before;
+      resetRecord(record); record.checked = true; record.missing = true;
+      display(label, record, record.native);
       return;
     }
+    recordBytes += extra;
+    display(label, record, text);
+  }
+  function applyText(label, record, text, name) {
+    const override = config.displayName.trim() ? config.displayName : null;
+    const rendered = namesPolicy.render(text, override || name, override && name ? [name] : []);
+    if (rendered === null) return false;
+    const before = recordSize(record);
+    const extra = (text.length + rendered.length - (record.templateText?.length || 0) - (record.fullDisplay?.length || 0)) * 2;
+    if (extra > 0 && !room(extra, 0)) return false;
+    record.templateText = text; record.fullDisplay = rendered;
+    recordBytes += recordSize(record) - before;
+    record.checked = true; record.missing = false;
+    revealRecord(label, record);
+    return true;
+  }
+  function ask(label, record, response = null) {
+    if (!config.enabled || !config.ready || stopped || !active(label) || richChild(label) || !candidate(record.raw) || record.checked) return;
+    const alternatives = choices(record);
+    // Exact literal and USER-template rows all outrank any indexed dialogue reuse.
+    for (const exactOnly of record.isStory ? [true, false] : [false]) {
+      for (const choice of alternatives) {
+        const key = memoryKey(choice.source, record.isStory, exactOnly);
+        const exact = recalled('x\0' + choice.source);
+        const text = exact !== undefined ? exact : response?.key === key ? response.text : recalled(key);
+        if (text !== undefined) {
+          if (text === null) continue;
+          if (!applyText(label, record, text, choice.name)) continue;
+          return;
+        }
+        const existing = pending.get(key);
+        if (existing) { existing.bindings.set(record.raw, choice.name); return; }
+        if (!room(entryBytes(key, null))) { record.checked = true; record.missing = true; return; }
+        const id = 'g' + generation + 'r' + (++sequence);
+        const request = {id, source: choice.source, key, isStory: record.isStory, exactOnly, generation, bindings: new Map([[record.raw, choice.name]])};
+        pending.set(key, request); requests.set(id, request);
+        pendingBytes += entryBytes(key, null);
+        emit('LOOKUP', {cacheEpoch: config.cacheEpoch, item: {id, source: choice.source, context: record.context, exactOnly}});
+        return;
+      }
+    }
     record.checked = true; record.missing = true;
+    display(label, record, record.native);
   }
   function update(label, value, preserve = false) {
     if (!safeType(label) || richChild(label)) return nativeSet(label, value);
-    let raw = typeof value === 'string' ? value : String(value);
+    let native = typeof value === 'string' ? value : String(value);
     let record = records.get(label);
-    if (record && raw === record.display && raw !== record.raw) { raw = record.raw; preserve = true; }
-    if (!record) {
-      if (raw.length > 8192 || !room(raw.length * 4)) return nativeSet(label, value);
-      record = {raw, display: raw, style: null, checked: false, missing: false, wasActive: active(label)};
-      records.set(label, record); recordBytes += raw.length * 4; index(label, record);
-    } else if (raw !== record.raw) {
-      // Restore the original font before a new dialogue takes ownership of this component.
-      const previousBusy = busy; busy = true;
-      try { restoreStyle(label, record); } finally { busy = previousBusy; }
-      if (raw.length > 8192 || !room(Math.max(0, raw.length * 4 - entryBytes(record.raw, record.display)), 0)) {
-        forget(label, record); return nativeSet(label, value);
-      }
-      unindex(label, record); recordBytes += (raw.length - record.raw.length) * 2;
-      record.raw = raw; record.checked = false; record.missing = false; index(label, record); preserve = false;
+    if (record && record.checked && !record.missing && native === record.display && native !== record.native && story.source(label, record.native) === record.raw) {
+      native = record.native; preserve = true;
     }
-    if (config.enabled && config.ready && record.checked && !record.missing && record.display !== raw) display(label, record, record.display);
-    else if (!preserve) display(label, record, raw);
+    const raw = story.source(label, native), labelContext = context(label), isStory = dialogue.isStory(labelContext);
+    if (!record) {
+      if (raw.length > 8192 || !room((raw.length + native.length * 2) * 2)) return nativeSet(label, value);
+      record = {raw, native, display: native, templateText: null, fullDisplay: null, style: null, checked: false, missing: false, context: labelContext, isStory, wasActive: active(label)};
+      records.set(label, record); recordBytes += recordSize(record); index(label, record);
+    } else {
+      if (raw !== record.raw || isStory !== record.isStory) {
+        // Restore the original font before a new dialogue takes ownership.
+        const previousBusy = busy; busy = true;
+        try { restoreStyle(label, record); } finally { busy = previousBusy; }
+        if (raw.length > 8192 || !room(Math.max(0, (raw.length + native.length * 2) * 2 - recordSize(record)), 0)) {
+          forget(label, record); return nativeSet(label, value);
+        }
+        unindex(label, record); resetRecord(record);
+        recordBytes += (raw.length - record.raw.length) * 2;
+        record.raw = raw; index(label, record); preserve = false;
+      }
+      const extra = (native.length - record.native.length) * 2;
+      if (extra > 0 && !room(extra, 0)) { forget(label, record, true); return nativeSet(label, value); }
+      recordBytes += extra; record.native = native;
+      record.context = labelContext; record.isStory = isStory;
+    }
+    if (config.enabled && config.ready && record.checked && !record.missing && record.fullDisplay !== null) {
+      revealRecord(label, record);
+    } else if (!preserve) display(label, record, native);
     ask(label, record);
   }
   function status() {
     let visible = 0, translated = 0, missing = 0;
     for (const [label, record] of records) if (active(label) && !richChild(label)) {
-      visible++; if (record.raw !== record.display) translated++; if (record.missing) missing++;
+      visible++; if (record.native !== record.display) translated++; if (record.missing) missing++;
     }
     return {ready: !!engine, enabled: config.enabled, warming: !config.ready, stopped, disposed, error, visible, translated, missing,
       waiting: pending.size, tracked: records.size, entries: records.size + memory.size + pending.size,
@@ -248,11 +304,15 @@
     lastLight = Date.now();
     try {
       if (conflict()) return;
+      readNames();
       for (const [label, record] of records) {
         if (!valid(label)) { forget(label, record); continue; }
         if (richChild(label)) { forget(label, record, true); continue; }
         const on = active(label);
-        if (on) { const current = actual(label); if (!record.wasActive || current !== record.display) update(label, current === record.display ? record.raw : current, current === record.display); }
+        if (on) {
+          const current = actual(label);
+          if (!record.wasActive || !record.checked || current !== record.display || story.source(label, record.native) !== record.raw) update(label, current === record.display ? record.native : current, current === record.display);
+        }
         record.wasActive = on;
       }
     } catch { fail('게임 엔진 구조와 호환되지 않아 원문을 유지합니다.'); }
@@ -277,7 +337,7 @@
         if (++count > 30000 || stack.length > 30000) { fail('게임 화면 구조가 너무 커서 캐시 적용을 중단했습니다.'); return; }
         for (const label of node._components || []) if (safeType(label) && !richChild(label)) {
           const record = records.get(label), current = actual(label);
-          update(label, record && current === record.display ? record.raw : current, !!record && current === record.display);
+          update(label, record && current === record.display ? record.native : current, !!record && current === record.display);
           const next = records.get(label); if (next) { seen.add(label); next.wasActive = active(label); }
         }
         for (const child of node.children || []) {
@@ -328,7 +388,7 @@
         if (!item || !candidate(item.source) || typeof item.text !== 'string' || !item.text.trim() || item.text.length > 50000) return;
         size += item.source.length + item.text.length; if (size > 131072) return;
       }
-      for (const item of message.entries) remember(item.source, item.text);
+      for (const item of message.entries) remember('x\0' + item.source, item.text);
       return;
     }
     if (message.type !== 'RESULT' || !config.enabled || !config.ready || !Array.isArray(message.results) || message.results.length > 32) return;
@@ -337,20 +397,23 @@
       if (!result || typeof result.id !== 'string' || result.id.length > 80 || (result.missing !== true && (typeof result.text !== 'string' || !result.text.trim() || result.text.length > 50000))) return;
       size += result.id.length + (typeof result.text === 'string' ? result.text.length : 0); if (size > 131072) return;
     }
+    readNames();
     for (const result of message.results) {
       const request = requests.get(result.id); if (!request || request.generation !== generation) continue;
       requests.delete(result.id);
-      if (pending.get(request.source) === request) {
-        pending.delete(request.source); pendingBytes -= entryBytes(request.source, null);
+      if (pending.get(request.key) === request) {
+        pending.delete(request.key); pendingBytes -= entryBytes(request.key, null);
       }
       request.text = result.missing === true ? null : result.text;
-      remember(request.source, request.text);
+      remember(request.key, request.text);
       for (const [raw, name] of request.bindings) {
         for (const label of bySource.get(raw) || []) {
-          const record = records.get(label); if (!record || !valid(label)) continue;
+          const record = records.get(label); if (!record || !valid(label) || record.isStory !== request.isStory) continue;
           if (!choices(record).some(choice => choice.source === request.source && choice.name === name)) continue;
           const current = actual(label);
-          if (current !== record.display && current !== record.raw) { update(label, current); continue; }
+          if (story.source(label, record.native) !== record.raw || dialogue.isStory(context(label)) !== record.isStory || (current !== record.display && current !== record.native)) {
+            update(label, current === record.display ? record.native : current); continue;
+          }
           ask(label, record, request);
         }
       }

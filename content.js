@@ -1,11 +1,15 @@
 /* ISOLATED world: only public configuration and read-only saved-cache requests. */
-(() => {
+(async () => {
   'use strict';
   if (location.origin !== 'https://gg-client-r.crave-saga.net' || !/^\/client\/[^/]+\/index_dmm\.html$/.test(location.pathname)) return;
   const APP = Symbol.for('cravesage-translator-mini.bridge.v1');
   const CHANNEL = 'cravesage-translator-mini/v1';
   if (window[APP]) return;
   const MAX_ENTRIES = 5000, MAX_BYTES = 8 * 1024 * 1024;
+  // A manifest file shared with MAIN is deduplicated by Chromium; import it in ISOLATED.
+  if (!globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')]) await import(chrome.runtime.getURL('dialogue-text.js'));
+  const dialogue = globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')];
+  const keyFor = (source, context, exactOnly) => context === undefined ? 'x\0' + source : (dialogue.isStory(context) ? 's' : 'n') + (exactOnly ? 'e' : 'f') + '\0' + source;
   const localCache = new Map(), queue = new Map(), flying = new Map();
   let config = {enabled: false, target: '한국어', fontFamily: 'Malgun Gothic', playerName: '', displayName: '', cacheEpoch: ''};
   let ready = false, warming = false, disposed = false, stopped = false, generation = 0, configRequest = 0, sequence = 0;
@@ -21,14 +25,16 @@
     }
     return localBytes + queueBytes + bytes <= MAX_BYTES && localCache.size + queue.size + flying.size + entries <= MAX_ENTRIES;
   }
-  function remember(source, text) {
-    if (localCache.has(source)) { localBytes -= cacheBytes(source, localCache.get(source)); localCache.delete(source); }
-    const bytes = cacheBytes(source, text); if (!room(bytes)) return;
-    localCache.set(source, text); localBytes += bytes;
+  function remember(source, text, context, exactOnly) {
+    const key = keyFor(source, context, exactOnly);
+    if (localCache.has(key)) { localBytes -= cacheBytes(key, localCache.get(key)); localCache.delete(key); }
+    const bytes = cacheBytes(key, text); if (!room(bytes)) return;
+    localCache.set(key, text); localBytes += bytes;
   }
-  function recalled(source) {
-    if (!localCache.has(source)) return undefined;
-    const text = localCache.get(source); localCache.delete(source); localCache.set(source, text); return text;
+  function recalled(source, context, exactOnly) {
+    const exact = keyFor(source), key = localCache.has(exact) ? exact : keyFor(source, context, exactOnly);
+    if (!localCache.has(key)) return undefined;
+    const text = localCache.get(key); localCache.delete(key); localCache.set(key, text); return text;
   }
   function clear() {
     clearTimeout(lookupTimer); lookupTimer = null; activeRequest = null;
@@ -75,7 +81,7 @@
           remember(entry.source, entry.text);
         }
         // Send only the bounded retained L1, never cache metadata or privileged routes.
-        sendChunks('WARM', 'entries', [...localCache].map(([source, text]) => ({source, text})));
+        sendChunks('WARM', 'entries', [...localCache].map(([key, text]) => ({source: key.slice(2), text})));
       } catch (error) {
         if (disposed || gen !== generation) return;
         notice = String(error.message || error).slice(0, 300);
@@ -100,12 +106,12 @@
     lookupTimer = setTimeout(() => { lookupTimer = null; flush(); }, 8);
   }
   function lookup(item) {
-    const text = recalled(item.source);
+    const key = keyFor(item.source, item.context, item.exactOnly), text = recalled(item.source, item.context, item.exactOnly);
     if (text !== undefined) {
       if (text !== null) cacheHits++;
       sendChunks('RESULT', 'results', [text === null ? {id: item.id, missing: true} : {id: item.id, text, cached: true}]); return;
     }
-    const existing = queue.get(item.source) || flying.get(item.source);
+    const existing = queue.get(key) || flying.get(key);
     if (existing) {
       if (!existing.ids.has(item.id)) {
         if (existing.ids.size >= 32 || !room(item.id.length * 2, 0)) { sendChunks('RESULT', 'results', [{id: item.id, missing: true}]); return; }
@@ -113,21 +119,21 @@
       }
       return;
     }
-    const bytes = (item.source.length + item.context.length + item.id.length) * 2;
+    const bytes = (key.length + item.source.length + item.context.length + item.id.length) * 2;
     if (!room(bytes)) { sendChunks('RESULT', 'results', [{id: item.id, missing: true}]); return; }
-    queue.set(item.source, {source: item.source, context: item.context, ids: new Set([item.id]), bytes}); queueBytes += bytes; schedule();
+    queue.set(key, {key, source: item.source, context: item.context, exactOnly: item.exactOnly, ids: new Set([item.id]), bytes}); queueBytes += bytes; schedule();
   }
   async function flush() {
     if (activeRequest || disposed || stopped || warming || !config.enabled || !queue.size) return;
     const token = {generation}, groups = []; let chars = 0;
-    for (const [source, group] of queue) {
-      if (groups.length >= 32 || chars + source.length > 131072) break;
-      queue.delete(source); group.id = 'c' + (++sequence); groups.push(group); chars += source.length; flying.set(source, group);
+    for (const [key, group] of queue) {
+      if (groups.length >= 32 || chars + group.source.length > 131072) break;
+      queue.delete(key); group.id = 'c' + (++sequence); groups.push(group); chars += group.source.length; flying.set(key, group);
     }
     if (!groups.length) return;
     activeRequest = token;
     try {
-      const answer = await runtime({type: 'CACHE_LOOKUP', items: groups.map(group => ({id: group.id, source: group.source, context: group.context}))});
+      const answer = await runtime({type: 'CACHE_LOOKUP', items: groups.map(group => ({id: group.id, source: group.source, context: group.context, exactOnly: group.exactOnly}))});
       if (disposed || stopped || token.generation !== generation) return;
       if (answer.cacheEpoch !== config.cacheEpoch) { await refreshConfig(); return; }
       if (!Array.isArray(answer.results) || answer.results.length > 32) throw Error('잘못된 캐시 조회 응답입니다.');
@@ -138,10 +144,10 @@
       }
       const outgoing = [];
       for (const group of groups) {
-        if (flying.get(group.source) !== group) continue;
-        flying.delete(group.source); queueBytes -= group.bytes;
+        if (flying.get(group.key) !== group) continue;
+        flying.delete(group.key); queueBytes -= group.bytes;
         const result = results.get(group.id), text = typeof result?.text === 'string' && result.missing !== true ? result.text : null;
-        remember(group.source, text);
+        remember(group.source, text, group.context, group.exactOnly);
         if (text !== null) cacheHits += group.ids.size;
         for (const id of group.ids) outgoing.push(text === null ? {id, missing: true} : {id, text, cached: true});
       }
@@ -151,9 +157,9 @@
         notice = String(error.message || error).slice(0, 300);
         const outgoing = [];
         for (const group of groups) {
-          if (flying.get(group.source) !== group) continue;
-          flying.delete(group.source); queueBytes -= group.bytes;
-          remember(group.source, null);
+          if (flying.get(group.key) !== group) continue;
+          flying.delete(group.key); queueBytes -= group.bytes;
+          remember(group.source, null, group.context, group.exactOnly);
           for (const id of group.ids) outgoing.push({id, missing: true});
         }
         sendChunks('RESULT', 'results', outgoing);
@@ -184,8 +190,8 @@
     }
     if (message.type !== 'LOOKUP' || !ready || warming || stopped || !config.enabled || message.cacheEpoch !== config.cacheEpoch) return;
     const item = message.item;
-    if (!item || !idValid(item.id) || !sourceValid(item.source) || typeof item.context !== 'string' || item.context.length > 300) return;
-    lookup({id: item.id, source: item.source, context: item.context});
+    if (!item || !idValid(item.id) || !sourceValid(item.source) || typeof item.context !== 'string' || item.context.length > 300 || (item.exactOnly !== undefined && typeof item.exactOnly !== 'boolean')) return;
+    lookup({id: item.id, source: item.source, context: item.context, exactOnly: item.exactOnly === true});
   }
   function status() {
     return {status: {...engineStatus}, notice, cacheHits, queued: queue.size + flying.size, warming,

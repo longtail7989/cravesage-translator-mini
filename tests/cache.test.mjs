@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {cacheId, cacheIdV2, makeCacheEntry, portableEntry, normalizeCacheHeader, validateImport, validateTextPair, CACHE_FORMAT} from '../cache.mjs';
+import {cacheId, cacheIdV2, makeCacheEntry, portableEntry, indexedCacheEntry, hasTextPairWarning, normalizeCacheHeader, validateImport, validateTextPair, CACHE_FORMAT} from '../cache.mjs';
 
 const row = async (source = '攻撃力が10%上昇する。', text = '공격력이 10% 상승합니다.', extra = {}) =>
   portableEntry(await makeCacheEntry({source, text, target: '한국어', context: 'skill', createdAt: 100, updatedAt: 100, ...extra}));
@@ -36,13 +36,14 @@ test('portable versions one through three round-trip manual edits', async () => 
   }
 });
 
-test('numbers, markup, variables and exact newline sequence cannot change on edit or import', async () => {
+test('manual protection remains strict while imported translation differences are preserved unchanged', async () => {
   const source = '<b>攻撃10%</b>\r\n{value}３ターン';
   const translation = '<b>공격10%</b>\r\n{value}３턴';
   assert.equal(validateTextPair(source, translation), true);
   for (const text of [translation.replace('10%', '11%'), translation.replace('\r\n', '\n'), translation.replace('<b>', '<i>'), translation.replace('{value}', '{other}')]) {
     assert.throws(() => validateTextPair(source, text));
-    await assert.rejects(validateImport(file([await row(source, translation).then(r => ({...r, text}))])));
+    const [loaded] = await validateImport(file([await row(source, translation).then(r => ({...r, text}))]));
+    assert.equal(loaded.text, text);
   }
 });
 
@@ -97,4 +98,65 @@ test('shared player names can move with localization but keep multiplicity and a
     translated.replace('\n', '\r\n'),
     translated.replace('</b>', '</i>')
   ]) assert.throws(() => validateTextPair(source, invalid));
+});
+
+test('dialogue reuse strips only one complete outer size wrapper and unprotected newlines', async () => {
+  const dialogue = globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')];
+  const source = '最初の\n台詞{USER}<b>続き</b>';
+  const wrapped = '<size=24>最初の台詞{USER}<b>続き</b></size>';
+  const text = '첫\n대사{USER}<b>계속</b>';
+  const entry = await makeCacheEntry({source, text, target: '한국어', context: 'unrelated', createdAt: 100, updatedAt: 200});
+  assert.equal(entry.dialogueKey, dialogue.key(wrapped));
+  assert.equal(entry.manualRank, 1);
+  assert.equal(entry.reverseTime, Number.MAX_SAFE_INTEGER - 200);
+  assert.equal(dialogue.display(wrapped, text), '<size=24>첫대사{USER}<b>계속</b></size>');
+  assert.equal(dialogue.display(source, '<size=12>첫\n대사{USER}<b>계속</b></size>'), text);
+  assert.notEqual(entry.id, await cacheId(entry.target, wrapped));
+  assert.deepEqual(portableEntry(indexedCacheEntry(entry)), portableEntry(entry));
+});
+
+test('dialogue equivalence keeps protected spans, whitespace, nesting and Unicode opaque', () => {
+  const dialogue = globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')];
+  for (const [a, b] of [
+    ['台詞<tag value="a\nb">', '台詞<tag value="ab">'],
+    ['台詞{a\nb}', '台詞{ab}'],
+    ['台詞<b>続き</b>', '台詞続き'],
+    ['台詞10%', '台詞11%'],
+    ['台 詞', '台詞'],
+    ['ガ', 'ガ'],
+    ['<size=20>台詞</size>追加', '台詞追加'],
+    ['<size=20><size=10>台詞</size></size>', '台詞']
+  ]) assert.equal(dialogue.equivalent(a, b), false, JSON.stringify([a, b]));
+  assert.equal(dialogue.equivalent('台\r\n詞\r続き\n', '<size=20>台詞続き</size>'), true);
+});
+
+test('dialogue context whitelist requires a complete supported Unity object segment', () => {
+  const dialogue = globalThis[Symbol.for('cravesage-translator-mini.dialogue.v1')];
+  for (const name of ['AdvText', 'AdvTextExtension', 'ggMessageView', 'ggAdultMessageView', 'AdvRichBackLogText', 'AdvExtensionLogMessageThumbnail', 'AdvCommonScrollView']) {
+    assert.equal(dialogue.isStory(name), true);
+    assert.equal(dialogue.isStory('Canvas / ' + name + ' / Text'), true);
+  }
+  for (const context of ['', 'story', 'skill', 'Canvas/AdvText/Text', 'NotAdvText', 'AdvTextSuffix', undefined]) assert.equal(dialogue.isStory(context), false);
+});
+
+test('only useful warning-free rows enter the dialogue index and stale fields are removed', async () => {
+  const automatic = await makeCacheEntry({source: '固有名詞', text: '固有名詞', target: '한국어', createdAt: 100, updatedAt: 100});
+  assert.equal(Object.hasOwn(automatic, 'dialogueKey'), false);
+  const manual = indexedCacheEntry({...automatic, manual: true});
+  assert.equal(manual.dialogueKey, automatic.source);
+  assert.equal(manual.manualRank, 0);
+  const warning = indexedCacheEntry({...manual, text: '다른10%'});
+  assert.equal(hasTextPairWarning(warning.source, warning.text), true);
+  assert.equal(Object.hasOwn(warning, 'dialogueKey'), false);
+  assert.equal(Object.hasOwn(warning, 'manualRank'), false);
+  assert.equal(warning.text, '다른10%');
+});
+
+test('derived dialogue fields never migrate personal names or leak into portable rows', async () => {
+  const original = await row('太郎は\nここにいる。', '타로는\n여기에 있다.', {context: 'AdvText', manual: true});
+  const [loaded] = await validateImport(file([original]));
+  assert.deepEqual(portableEntry(loaded), original);
+  assert.equal(loaded.dialogueKey, '太郎はここにいる。');
+  assert.equal(Object.hasOwn(portableEntry(loaded), 'dialogueKey'), false);
+  assert.equal(Object.hasOwn(portableEntry(loaded), 'manualRank'), false);
 });

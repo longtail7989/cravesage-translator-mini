@@ -13,7 +13,7 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 const files = [
   'manifest.json', 'background.mjs', 'core.mjs', 'cache.mjs', 'cache-store.mjs',
-  'cache-transfer.mjs', 'cache-editor.mjs', 'name-policy.js', 'main.js', 'content.js',
+  'cache-transfer.mjs', 'cache-editor.mjs', 'name-policy.js', 'dialogue-text.js', 'story-text.js', 'main.js', 'content.js',
   'popup.html', 'popup.css', 'popup.mjs', 'file-transfer.mjs',
   'icons/icon16.png', 'icons/icon32.png', 'icons/icon48.png', 'icons/icon128.png'
 ].sort();

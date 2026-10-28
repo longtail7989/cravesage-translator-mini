@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   const TOKEN = '{USER}';
-  const usable = name => typeof name === 'string' && !!name.trim();
+  const usable = name => typeof name === 'string' && !!name.trim() && name.length <= 64 && !/[<>{}\r\n]/.test(name);
   const unique = names => [...new Set(Array.isArray(names) ? names.filter(usable) : [])];
   const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   function replaceNames(text, aliases) {
@@ -23,11 +23,12 @@
     }
     return result;
   }
-  function render(template, name) {
+  function render(template, name, aliases = []) {
     if (typeof template !== 'string') return null;
+    // Personalization is display-only and limited to aliases bound by the source.
+    if (usable(name)) template = replaceNames(template, aliases);
     if (!template.includes(TOKEN)) return template;
-    if (!usable(name)) return null;
-    return template.replace(/\{USER\}/g, () => name);
+    return usable(name) ? template.replace(/\{USER\}/g, () => name) : null;
   }
-  globalThis[Symbol.for('cravesage-translator-mini.names.v1')] = Object.freeze({TOKEN, replaceNames, candidates, render});
+  globalThis[Symbol.for('cravesage-translator-mini.names.v1')] = Object.freeze({TOKEN, usable, replaceNames, candidates, render});
 })();

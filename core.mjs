@@ -1,5 +1,5 @@
 // Cache-only shared helpers. No translation service or network code.
-export const VERSION='0.1.2';
+export const VERSION='0.1.4';
 export const DEFAULTS=Object.freeze({enabled:true,target:'한국어',fontFamily:'Malgun Gothic',playerName:'',displayName:''});
 export const isPlainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 export function sanitizeSettings(input={}){
